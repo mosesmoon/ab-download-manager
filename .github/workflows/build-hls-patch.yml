@@ -1,0 +1,70 @@
+# Builds installers of the HLS (fMP4 / disguised segments) patched AB Download Manager
+# and publishes them as a pre-release in this fork.
+name: Build HLS patched ABDM
+
+on:
+  push:
+    branches: [ "hls-fmp4-disguised-segments" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-packages:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ "windows-2022", "ubuntu-latest" ]
+    runs-on: ${{ matrix.os }}
+    env:
+      SKIP_ANDROID_BUILD: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JBR
+        uses: actions/setup-java@v4
+        with:
+          distribution: "jetbrains"
+          java-package: "jdk"
+          java-version: "25"
+          check-latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build package for current OS using gradle
+        shell: bash
+        run: ./gradlew createReleaseFolderForCi
+
+      - name: Upload output to artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: ./build/ci-release
+          name: app-${{ matrix.os }}
+
+  release:
+    runs-on: "ubuntu-latest"
+    needs: [ "create-packages" ]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          pattern: app-*
+          merge-multiple: true
+
+      - run: ls -R release | head -50
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hls-patch-${{ github.run_number }}
+          name: ABDM + HLS fMP4/disguised segments (build ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          body: |
+            Unofficial build of AB Download Manager with the HLS patch:
+            - fMP4 / CMAF segments (#EXT-X-MAP)
+            - image-disguised segments (.jpeg/.png/...) unwrapped while assembling
+            - playlist headers (Referer/Cookie/User-Agent) sent with segment requests
+          files: |
+            release/binaries/*
