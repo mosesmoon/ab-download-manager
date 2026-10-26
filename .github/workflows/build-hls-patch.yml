@@ -1,4 +1,4 @@
-# Builds installers of the HLS (fMP4 / disguised segments) patched AB Download Manager
+# Builds Windows / Linux / macOS (Apple Silicon + Intel) installers of the HLS (fMP4 / disguised segments) patched AB Download Manager
 # and publishes them as a pre-release in this fork.
 name: Build HLS patched ABDM
 
@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ "windows-2022", "ubuntu-latest" ]
+        os: [ "windows-2022", "ubuntu-latest", "macos-15", "macos-15-intel" ]
     runs-on: ${{ matrix.os }}
     env:
       SKIP_ANDROID_BUILD: "true"
@@ -32,6 +32,11 @@ jobs:
           check-latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # macOS: create-dmg builds the drag-to-Applications installer (.dmg)
+      - name: Install create-dmg (for macOS)
+        if: startsWith(matrix.os, 'macos-')
+        run: brew install create-dmg
 
       - name: Build package for current OS using gradle
         shell: bash
