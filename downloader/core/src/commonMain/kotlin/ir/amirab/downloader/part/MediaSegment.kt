@@ -14,6 +14,12 @@ data class MediaSegment(
     var length: Long? = null,
     @Transient
     override var current: Long = 0,
+    /**
+     * `true` when this part is an fMP4 initialization section (`#EXT-X-MAP`) rather than a media segment.
+     * Init parts use a negative [segmentIndex] (`-(indexOfFollowingSegment + 1)`) so their IDs never
+     * collide with media segment IDs, and they are placed right before the first segment that uses them.
+     */
+    val isInit: Boolean = false,
 ) : DownloadPart {
 
     override fun howMuchProceed() = current

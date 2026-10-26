@@ -8,8 +8,6 @@ import ir.amirab.downloader.connection.Connection
 import ir.amirab.downloader.connection.IResponseInfo
 import ir.amirab.downloader.connection.response.HttpResponseInfo
 import ir.amirab.downloader.connection.response.expectSuccess
-import ir.amirab.downloader.utils.FileNameUtil
-import ir.amirab.util.HttpUrlUtils
 import okio.buffer
 import java.io.IOException
 
@@ -51,15 +49,12 @@ data class HLSResponseInfo(
                     "playlist has no segments"
                 )
             }
-            val firstSegmentExtension = HttpUrlUtils
-                .createURL(connection.responseInfo.requestUrl)
-                .resolve(mediaSegments[0].uri())?.toString()
-                ?.let(HttpUrlUtils::extractNameFromLink)
-                ?.let(FileNameUtil::getExtensionOrNull)
-                ?.lowercase()
-            if (firstSegmentExtension != "ts") {
+            // Segment file extensions are not checked anymore:
+            // - fMP4 / CMAF segments (.m4s, .mp4, ...) are supported through their #EXT-X-MAP init section
+            // - disguised segments (.jpeg, .png, .html, ...) are unwrapped while assembling (see SegmentPayload)
+            if (mediaSegments.any { it.byteRange().isPresent }) {
                 throw UnsupportedOperationException(
-                    "Only HLS .ts segments supported at the moment, but '$firstSegmentExtension' provided"
+                    "HLS playlists with #EXT-X-BYTERANGE segments are not supported"
                 )
             }
             if (isMediaPlayListEncrypted(playlist)) {

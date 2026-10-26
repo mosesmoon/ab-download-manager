@@ -17,6 +17,8 @@ class HLSPartDownloader(
     part: MediaSegment,
     getDestWriter: () -> DestWriter,
     private val baseURL: String,
+    /** the playlist's credentials; their headers (Referer, Cookie, ...) are needed by many CDNs for segments too */
+    private val credentials: IHLSCredentials,
     private val client: HttpDownloaderClient,
     private val speedLimiters: List<SpeedLimiter>,
 ) : PartDownloader<
@@ -38,7 +40,14 @@ class HLSPartDownloader(
             "link is incorrect! ${part.link}"
         }
         val connect = client.connect(
-            HttpDownloadCredentials(fullLink.toString()),
+            HttpDownloadCredentials(
+                link = fullLink.toString(),
+                headers = credentials.headers,
+                username = credentials.username,
+                password = credentials.password,
+                downloadPage = credentials.downloadPage,
+                userAgent = credentials.userAgent,
+            ),
             null, null,
         )
         if (stop || !currentCoroutineContext().isActive) {

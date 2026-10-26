@@ -69,6 +69,10 @@ class HLSDownloadJob(
                 it.getID().toString()
             },
             appendMode = false,
+            // parts are already in playback order (fMP4 init sections come right before their segments)
+            keepPartOrder = true,
+            // some hosts disguise segments as images (fake PNG/JPEG header before the real TS/fMP4 data)
+            getPayloadOffset = SegmentPayload::findPayloadOffset,
         )
     }
 
@@ -479,6 +483,7 @@ class HLSDownloadJob(
                     getDestWriter = {
                         destination.getWriterFor(part)
                     },
+                    credentials = downloadItem,
                     client = client,
                     speedLimiters = listOf(
                         downloadManager.speedLimiter,
@@ -528,14 +533,7 @@ class HLSDownloadJob(
     fun updateParts(
         playlist: MediaPlaylist
     ) {
-        val newParts = playlist.mediaSegments()
-            .mapIndexed { index, segment ->
-                MediaSegment(
-                    segmentIndex = playlist.mediaSequence() + index,
-                    link = segment.uri(),
-                    duration = segment.duration()
-                )
-            }
+        val newParts = createPartsFromPlaylist(playlist)
         val currentParts = parts
         downloadItem.duration = newParts.sumOf { it.duration }
         if (currentParts.isEmpty()) {
@@ -646,6 +644,44 @@ class HLSDownloadJob(
 
     override fun reloadSettings() {
         onPreferredConnectionCountChanged()
+    }
+
+    companion object {
+        /**
+         * Converts a media playlist into download parts in playback order.
+         * Whenever a segment introduces a new `#EXT-X-MAP` (fMP4 / CMAF initialization section)
+         * an init part is inserted right before it, so the assembled file is a playable fragmented MP4.
+         */
+        fun createPartsFromPlaylist(playlist: MediaPlaylist): List<MediaSegment> {
+            val result = ArrayList<MediaSegment>(playlist.mediaSegments().size + 1)
+            var currentMapUri: String? = null
+            playlist.mediaSegments().forEachIndexed { index, segment ->
+                val segmentIndex = playlist.mediaSequence() + index
+                val map = segment.segmentMap().orElse(null)
+                if (map != null && map.uri() != currentMapUri) {
+                    if (map.byteRange().isPresent) {
+                        throw UnsupportedOperationException("HLS #EXT-X-MAP with BYTERANGE is not supported")
+                    }
+                    currentMapUri = map.uri()
+                    result.add(
+                        MediaSegment(
+                            segmentIndex = -(segmentIndex + 1),
+                            link = map.uri(),
+                            duration = 0.0,
+                            isInit = true,
+                        )
+                    )
+                }
+                result.add(
+                    MediaSegment(
+                        segmentIndex = segmentIndex,
+                        link = segment.uri(),
+                        duration = segment.duration()
+                    )
+                )
+            }
+            return result
+        }
     }
 
     override suspend fun extraConfigsReceived(config: DownloadJobExtraConfig) {

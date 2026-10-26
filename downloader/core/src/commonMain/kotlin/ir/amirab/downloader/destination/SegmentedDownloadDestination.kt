@@ -14,6 +14,10 @@ class SegmentedDownloadDestination(
     val getAllParts: () -> List<DownloadPart>,
     val appendMode: Boolean,
     outputFile: File,
+    /** assemble parts in the order returned by [getAllParts] instead of sorting them by id */
+    val keepPartOrder: Boolean = false,
+    /** number of leading bytes of a part file to skip when assembling (e.g. a fake image header) */
+    val getPayloadOffset: ((File) -> Long)? = null,
 ) : DownloadDestination(outputFile) {
     private fun getFileOfPart(downloadPart: DownloadPart): File {
         val id = downloadPart.getID()
@@ -80,7 +84,7 @@ class SegmentedDownloadDestination(
     override fun onAllPartsCompleted(onProgressUpdate: (Int?) -> Unit) {
         assemble(
             getAllParts()
-                .sortedBy { it.getID() }
+                .let { parts -> if (keepPartOrder) parts else parts.sortedBy { it.getID() } }
                 .map { tempDirectory.resolve(getFileName(it)) },
             outputFile,
             onProgressUpdate
@@ -94,13 +98,26 @@ class SegmentedDownloadDestination(
         onProgress: (Int) -> Unit
     ) {
         DownloadDestination.prepareDestinationFolder(outputFile)
-        val totalLength = sources.sumOf { it.length() }
+        val offsets = sources.map { file ->
+            getPayloadOffset
+                ?.let { runCatching { it(file) }.getOrNull() }
+                ?.coerceIn(0, file.length())
+                ?: 0L
+        }
+        val totalLength = sources.indices.sumOf { sources[it].length() - offsets[it] }
         var totalWritten = 0L
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         var percent = 0
         destination.outputStream().use { dst ->
-            sources.forEach { sourceFile ->
+            sources.forEachIndexed { index, sourceFile ->
                 sourceFile.inputStream().use { src ->
+                    // InputStream.skipNBytes is not available on older Android versions
+                    var toSkip = offsets[index]
+                    while (toSkip > 0) {
+                        val skipped = src.skip(toSkip)
+                        if (skipped <= 0) break
+                        toSkip -= skipped
+                    }
                     onProgress(percent)
                     while (true) {
                         val len = src.read(buffer)
