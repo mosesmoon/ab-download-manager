@@ -1,6 +1,12 @@
 package ir.amirab.downloader.downloaditem.hls
 
+import io.lindstrom.m3u8.model.KeyMethod
 import io.lindstrom.m3u8.model.MediaPlaylist
+import io.lindstrom.m3u8.model.SegmentKey
+import ir.amirab.downloader.connection.response.expectSuccess
+import ir.amirab.downloader.downloaditem.http.HttpDownloadCredentials
+import ir.amirab.util.HttpUrlUtils
+import okio.buffer
 import ir.amirab.downloader.DownloadManager
 import ir.amirab.downloader.connection.HttpDownloaderClient
 import ir.amirab.downloader.destination.DownloadDestination
@@ -73,6 +79,8 @@ class HLSDownloadJob(
             keepPartOrder = true,
             // some hosts disguise segments as images (fake PNG/JPEG header before the real TS/fMP4 data)
             getPayloadOffset = SegmentPayload::findPayloadOffset,
+            // AES-128 encrypted parts are decrypted (and unwrapped if disguised) while assembling
+            preparePartData = { part, file -> decryptPartIfNeeded(part, file) },
         )
     }
 
@@ -142,6 +150,13 @@ class HLSDownloadJob(
             // if download item is booted and parts is not empty it means that we resumed that file in some point
             // but we should check if all parts are already downloaded to finish the job before hitting the server unnecessarily!
             if (parts.isNotEmpty() && parts.all { it.isCompleted }) {
+                try {
+                    ensureKeys()
+                } catch (e: Exception) {
+                    e.printStackIfNOtUsual()
+                    scope.launch { pause(e) }
+                    return@launch
+                }
                 onDownloadFinished()
                 return@launch
             }
@@ -513,6 +528,7 @@ class HLSDownloadJob(
         if (parts.isEmpty()) {
             initialParts()
         }
+        ensureKeys()
         // at this point we have all the parts we need either by hitting remote or they are already in destination
         // before proceed we should check the downloaded parts and remove the "isCompleted" flag if they are missing
         parts
@@ -646,6 +662,58 @@ class HLSDownloadJob(
         onPreferredConnectionCountChanged()
     }
 
+    /** AES-128 keys by key URI (kept in memory only; re-fetched when the job is resumed) */
+    private val hlsKeys = ConcurrentHashMap<String, ByteArray>()
+
+    private fun resolveLink(link: String): String {
+        return link
+            .takeIf { HttpUrlUtils.isValidUrl(it) }
+            ?: requireNotNull(HttpUrlUtils.createURL(downloadItem.link).resolve(link)) {
+                "link is incorrect! $link"
+            }.toString()
+    }
+
+    private suspend fun ensureKeys() {
+        val missing = getParts()
+            .mapNotNull { it.keyUri }
+            .distinct()
+            .filter { !hlsKeys.containsKey(it) }
+        for (keyUri in missing) {
+            hlsKeys[keyUri] = fetchKey(keyUri)
+        }
+    }
+
+    private suspend fun fetchKey(keyUri: String): ByteArray {
+        val credentials = HttpDownloadCredentials(
+            link = resolveLink(keyUri),
+            headers = downloadItem.headers,
+            username = downloadItem.username,
+            password = downloadItem.password,
+            downloadPage = downloadItem.downloadPage,
+            userAgent = downloadItem.userAgent,
+        )
+        val key = client.connect(credentials, null, null).use { connection ->
+            connection.responseInfo.expectSuccess()
+            connection.source.buffer().use { it.readByteArray() }
+        }
+        if (key.size != HLSSegmentCrypto.KEY_SIZE) {
+            throw UnsupportedOperationException(
+                "HLS AES-128 key must be ${HLSSegmentCrypto.KEY_SIZE} bytes but ${key.size} bytes received"
+            )
+        }
+        return key
+    }
+
+    private fun decryptPartIfNeeded(part: DownloadPart, file: java.io.File): ByteArray? {
+        val segment = part as? MediaSegment ?: return null
+        val keyUri = segment.keyUri ?: return null
+        val key = requireNotNull(hlsKeys[keyUri]) { "HLS key is not loaded: $keyUri" }
+        val iv = segment.keyIv ?: HLSSegmentCrypto.ivForSequence(segment.segmentIndex)
+        val decrypted = HLSSegmentCrypto.decrypt(file, key, iv)
+        val offset = SegmentPayload.findPayloadOffset(decrypted)
+        return if (offset == 0) decrypted else decrypted.copyOfRange(offset, decrypted.size)
+    }
+
     companion object {
         /**
          * Converts a media playlist into download parts in playback order.
@@ -655,8 +723,16 @@ class HLSDownloadJob(
         fun createPartsFromPlaylist(playlist: MediaPlaylist): List<MediaSegment> {
             val result = ArrayList<MediaSegment>(playlist.mediaSegments().size + 1)
             var currentMapUri: String? = null
+            var currentKey: SegmentKey? = null
             playlist.mediaSegments().forEachIndexed { index, segment ->
                 val segmentIndex = playlist.mediaSequence() + index
+                // an #EXT-X-KEY applies to every following segment until the next one
+                segment.segmentKeys().lastOrNull()?.let { key ->
+                    requireSupportedKey(key)
+                    currentKey = key.takeIf { it.method() != KeyMethod.NONE }
+                }
+                val keyUri = currentKey?.uri()?.orElse(null)
+                val explicitIv = currentKey?.iv()?.orElse(null)?.let(HLSSegmentCrypto::normalizeIv)
                 val map = segment.segmentMap().orElse(null)
                 if (map != null && map.uri() != currentMapUri) {
                     if (map.byteRange().isPresent) {
@@ -669,6 +745,8 @@ class HLSDownloadJob(
                             link = map.uri(),
                             duration = 0.0,
                             isInit = true,
+                            keyUri = keyUri,
+                            keyIv = explicitIv ?: keyUri?.let { HLSSegmentCrypto.ivForSequence(segmentIndex) },
                         )
                     )
                 }
@@ -676,11 +754,31 @@ class HLSDownloadJob(
                     MediaSegment(
                         segmentIndex = segmentIndex,
                         link = segment.uri(),
-                        duration = segment.duration()
+                        duration = segment.duration(),
+                        keyUri = keyUri,
+                        keyIv = explicitIv ?: keyUri?.let { HLSSegmentCrypto.ivForSequence(segmentIndex) },
                     )
                 )
             }
             return result
+        }
+
+        /** Only clear-key AES-128 is supported; SAMPLE-AES and DRM key formats are rejected. */
+        fun requireSupportedKey(key: SegmentKey) {
+            when (key.method()) {
+                KeyMethod.NONE -> return
+                KeyMethod.AES_128 -> {
+                    val keyFormat = key.keyFormat().orElse("identity")
+                    if (!keyFormat.equals("identity", ignoreCase = true)) {
+                        throw UnsupportedOperationException("DRM protected HLS ($keyFormat) is not supported")
+                    }
+                    if (!key.uri().isPresent) {
+                        throw UnsupportedOperationException("HLS AES-128 key has no URI")
+                    }
+                }
+
+                else -> throw UnsupportedOperationException("HLS ${key.method()} encryption is not supported")
+            }
         }
     }
 

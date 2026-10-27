@@ -20,6 +20,10 @@ data class MediaSegment(
      * collide with media segment IDs, and they are placed right before the first segment that uses them.
      */
     val isInit: Boolean = false,
+    /** AES-128 key URI (as written in the playlist) when this part is encrypted, otherwise `null` */
+    val keyUri: String? = null,
+    /** AES-128 IV for this part as 32 hex chars (explicit `IV` attribute or derived from the media sequence) */
+    val keyIv: String? = null,
 ) : DownloadPart {
 
     override fun howMuchProceed() = current

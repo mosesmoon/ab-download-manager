@@ -1,6 +1,5 @@
 package ir.amirab.downloader.downloaditem.hls
 
-import io.lindstrom.m3u8.model.KeyMethod
 import io.lindstrom.m3u8.model.MediaPlaylist
 import io.lindstrom.m3u8.parser.MediaPlaylistParser
 import io.lindstrom.m3u8.parser.ParsingMode
@@ -57,10 +56,9 @@ data class HLSResponseInfo(
                     "HLS playlists with #EXT-X-BYTERANGE segments are not supported"
                 )
             }
-            if (isMediaPlayListEncrypted(playlist)) {
-                throw UnsupportedOperationException(
-                    "Encrypted HLS playlists are not supported"
-                )
+            // clear-key AES-128 is decrypted by HLSDownloadJob; SAMPLE-AES and DRM key formats are rejected
+            mediaSegments.forEach { segment ->
+                segment.segmentKeys().forEach(HLSDownloadJob::requireSupportedKey)
             }
             return HLSResponseInfo(
                 connection.responseInfo,
@@ -112,13 +110,6 @@ data class HLSResponseInfo(
             }
         }
 
-        private fun isMediaPlayListEncrypted(playlist: MediaPlaylist): Boolean {
-            return playlist.mediaSegments().any {
-                it.segmentKeys().any { key ->
-                    key.method() != KeyMethod.NONE
-                }
-            }
-        }
     }
 }
 

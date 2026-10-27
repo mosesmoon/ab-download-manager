@@ -18,6 +18,11 @@ class SegmentedDownloadDestination(
     val keepPartOrder: Boolean = false,
     /** number of leading bytes of a part file to skip when assembling (e.g. a fake image header) */
     val getPayloadOffset: ((File) -> Long)? = null,
+    /**
+     * returns the bytes to write for a part instead of its file content (e.g. a decrypted segment),
+     * or `null` to copy the file as-is
+     */
+    val preparePartData: ((DownloadPart, File) -> ByteArray?)? = null,
 ) : DownloadDestination(outputFile) {
     private fun getFileOfPart(downloadPart: DownloadPart): File {
         val id = downloadPart.getID()
@@ -82,12 +87,13 @@ class SegmentedDownloadDestination(
     }
 
     override fun onAllPartsCompleted(onProgressUpdate: (Int?) -> Unit) {
+        val parts = getAllParts()
+            .let { parts -> if (keepPartOrder) parts else parts.sortedBy { it.getID() } }
         assemble(
-            getAllParts()
-                .let { parts -> if (keepPartOrder) parts else parts.sortedBy { it.getID() } }
-                .map { tempDirectory.resolve(getFileName(it)) },
+            parts.map { tempDirectory.resolve(getFileName(it)) },
             outputFile,
-            onProgressUpdate
+            onProgressUpdate,
+            parts,
         )
         super.onAllPartsCompleted(onProgressUpdate)
     }
@@ -95,7 +101,8 @@ class SegmentedDownloadDestination(
     fun assemble(
         sources: List<File>,
         destination: File,
-        onProgress: (Int) -> Unit
+        onProgress: (Int) -> Unit,
+        parts: List<DownloadPart>? = null,
     ) {
         DownloadDestination.prepareDestinationFolder(outputFile)
         val offsets = sources.map { file ->
@@ -110,6 +117,18 @@ class SegmentedDownloadDestination(
         var percent = 0
         destination.outputStream().use { dst ->
             sources.forEachIndexed { index, sourceFile ->
+                val prepared = parts?.getOrNull(index)?.let { part -> preparePartData?.invoke(part, sourceFile) }
+                if (prepared != null) {
+                    // already transformed in memory (e.g. decrypted)
+                    dst.write(prepared)
+                    totalWritten += sourceFile.length() - offsets[index]
+                    val newPercent = calcPercent(totalWritten, totalLength)
+                    if (newPercent != percent) {
+                        onProgress(newPercent)
+                        percent = newPercent
+                    }
+                    return@forEachIndexed
+                }
                 sourceFile.inputStream().use { src ->
                     // InputStream.skipNBytes is not available on older Android versions
                     var toSkip = offsets[index]
